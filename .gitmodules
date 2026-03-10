@@ -1,3 +1,4 @@
 [submodule "d2m3u"]
 	path = d2m3u
 	url = https://github.com/fujimite/d2m3u.git
+    branch = trunk

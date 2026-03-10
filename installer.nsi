@@ -1,12 +1,12 @@
 !include "WinMessages.nsh"
 
 !define APP_NAME "d2m3u"
-!define APP_VERSION "0.3"
+!define APP_VERSION "0.3.2"
 !define INSTALL_DIR "$PROGRAMFILES64\d2m3u"
 !define UNINSTALLER "uninstall.exe"
 
 Name "${APP_NAME} ${APP_VERSION}"
-OutFile "d2m3u-setup.exe"
+OutFile "x64\Release\d2m3u-gui-setup.exe"
 InstallDir "${INSTALL_DIR}"
 RequestExecutionLevel admin
 ShowInstDetails show
@@ -21,19 +21,20 @@ UninstPage instfiles
 Section "Install"
     SetOutPath "$INSTDIR"
 
-    ; CLI, GUI, and all required DLLs from the Release build
     File "x64\Release\d2m3u.exe"
     File "x64\Release\d2m3u-gui.exe"
     File "x64\Release\*.dll"
 
+    SetOutPath "$INSTDIR\licenses"
+    File "x64\Release\licenses\*"
+
+    SetOutPath "$INSTDIR"
     WriteUninstaller "$INSTDIR\${UNINSTALLER}"
 
-    ; Add install dir to PATH
     ReadRegStr $0 HKCU "Environment" "PATH"
     WriteRegExpandStr HKCU "Environment" "PATH" "$0;$INSTDIR"
     SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
 
-    ; Add to Programs and Features
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
         "DisplayName" "${APP_NAME} ${APP_VERSION}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
@@ -54,6 +55,8 @@ Section "Uninstall"
     Delete "$INSTDIR\d2m3u.exe"
     Delete "$INSTDIR\d2m3u-gui.exe"
     Delete "$INSTDIR\*.dll"
+    Delete "$INSTDIR\licenses\*"
+    RMDir "$INSTDIR\licenses"
     Delete "$INSTDIR\${UNINSTALLER}"
     RMDir "$INSTDIR"
 

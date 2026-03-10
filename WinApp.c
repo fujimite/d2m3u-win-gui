@@ -415,7 +415,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         y += lh + 2;
         hEdtUsername = CreateWindowW(L"EDIT", L"",
             WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
-            x, y, w, eh,
+            x, y, w - 7, eh,
             hWnd, (HMENU)EDT_USERNAME, hInst, NULL);
         SendMessage(hEdtUsername, WM_SETFONT, (WPARAM)hFont, TRUE);
         y += eh + gap;
@@ -425,7 +425,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         y += lh + 2;
         hEdtPassword = CreateWindowW(L"EDIT", L"",
             WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD,
-            x, y, w, eh,
+            x, y, w - 7, eh,
             hWnd, (HMENU)EDT_PASSWORD, hInst, NULL);
         SendMessage(hEdtPassword, WM_SETFONT, (WPARAM)hFont, TRUE);
         y += eh + gap;
@@ -529,10 +529,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             MessageBoxW(hWnd, 
                 L"d2m3u GUI for Windows\n"
                 L"prod. fujimite\n\n"
-                L"Generates an m3u playlist from a local or web directory.\n"
+                L"Generates an m3u playlist from a local or web directory.\n\n"
                 L"This software uses curl, under the curl license.\n"
-                L"This software uses libraries from the FFmpeg project under the LGPLv2.1",
-                    L"About", MB_OK);
+                L"This software uses libraries from the FFmpeg project under the LGPLv2.1"
+                ,
+                L"About", MB_OK);
             break;
 
         case IDM_EXIT:
