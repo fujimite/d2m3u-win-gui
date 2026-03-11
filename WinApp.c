@@ -1,8 +1,9 @@
-#include <windows.h>
+ï»¿#include <windows.h>
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <stdio.h>
+#include "resource.h"
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -120,7 +121,7 @@ static BOOL BrowseForSaveFile(HWND hWnd, WCHAR* outPath, DWORD outSize) {
     COMDLG_FILTERSPEC filter = { L"M3U Playlist (*.m3u)", L"*.m3u" };
     pDlg->lpVtbl->SetFileTypes(pDlg, 1, &filter);
     pDlg->lpVtbl->SetDefaultExtension(pDlg, L"m3u");
-	pDlg->lpVtbl->SetFileName(pDlg, L"playlist.m3u");
+    pDlg->lpVtbl->SetFileName(pDlg, L"playlist.m3u");
     pDlg->lpVtbl->SetTitle(pDlg, L"Select Save Location of Playlist");
 
     DWORD opts;
@@ -187,7 +188,7 @@ static void CreateLogWindow(HWND hParent) {
     wc.lpszClassName = L"LogWindow";
     RegisterClassW(&wc);
 
-    hWndLog = CreateWindowW(L"LogWindow", L"d2m3u — Log",
+    hWndLog = CreateWindowW(L"LogWindow", L"d2m3u ï¿½ Log",
         WS_OVERLAPPEDWINDOW,
         150, 150, 600, 400,
         hParent, NULL, hInst, NULL);
@@ -235,8 +236,8 @@ static LRESULT CALLBACK LicenseWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
         HFONT hF = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HWND hTxt = CreateWindowW(L"STATIC",
             L"This software uses the following third-party libraries:\r\n\r\n"
-            L"• curl — licensed under the curl license\r\n"
-            L"• FFmpeg — licensed under the GNU LGPLv2.1\r\n\r\n"
+            L"ï¿½ curl ï¿½ licensed under the curl license\r\n"
+            L"ï¿½ FFmpeg ï¿½ licensed under the GNU LGPLv2.1\r\n\r\n"
             L"Click below to view the full license texts:",
             WS_VISIBLE | WS_CHILD,
             10, 10, 380, 120, hWnd, NULL, hInst, NULL);
@@ -279,6 +280,92 @@ static void ShowLicenseWindow(HWND hParent) {
     HWND hWnd = CreateWindowW(L"LicenseWindow", L"Licensing",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         200, 200, 410, 188,
+        hParent, NULL, hInst, NULL);
+    ShowWindow(hWnd, SW_SHOW);
+    UpdateWindow(hWnd);
+}
+
+static LRESULT CALLBACK AboutWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static HBITMAP hBmpScaled = NULL;
+    static int imgW = 0, imgH = 0;
+
+    switch (msg) {
+    case WM_CREATE: {
+        HBITMAP hBmpOrig = LoadBitmapW(hInst, MAKEINTRESOURCE(IDB_BITMAP1));
+        if (!hBmpOrig) {
+            MessageBoxW(hWnd, L"Failed to load bitmap", L"Debug", MB_OK);
+        }
+        if (hBmpOrig) {
+            BITMAP bm;
+            GetObject(hBmpOrig, sizeof(bm), &bm);
+            imgW = bm.bmWidth * 20 / 100;
+            imgH = bm.bmHeight * 20 / 100;
+
+            HDC hdcScreen = GetDC(NULL);
+            HDC hdcSrc = CreateCompatibleDC(hdcScreen);
+            HDC hdcDst = CreateCompatibleDC(hdcScreen);
+            hBmpScaled = CreateCompatibleBitmap(hdcScreen, imgW, imgH);
+
+            SelectObject(hdcSrc, hBmpOrig);
+            SelectObject(hdcDst, hBmpScaled);
+
+            SetStretchBltMode(hdcDst, HALFTONE);
+            StretchBlt(hdcDst, 0, 0, imgW, imgH,
+                hdcSrc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+
+            DeleteDC(hdcSrc);
+            DeleteDC(hdcDst);
+            ReleaseDC(NULL, hdcScreen);
+            DeleteObject(hBmpOrig);
+        }
+
+        HFONT hF = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HWND hTxt = CreateWindowW(L"STATIC",
+            L"d2m3u GUI for Windows\r\nprod. fujimite\r\n\r\n"
+            L"Generates an m3u playlist from a local or web directory.",
+            WS_VISIBLE | WS_CHILD,
+            10, 10, 380, 80, hWnd, NULL, hInst, NULL);
+        SendMessage(hTxt, WM_SETFONT, (WPARAM)hF, TRUE);
+        break;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc; GetClientRect(hWnd, &rc);
+        FillRect(hdc, &rc, (HBRUSH)(COLOR_BTNFACE + 1)); //clear first
+        if (hBmpScaled) {
+            HDC hdcMem = CreateCompatibleDC(hdc);
+            HBITMAP hOld = SelectObject(hdcMem, hBmpScaled);
+            int x = (rc.right - imgW) / 2;
+            BitBlt(hdc, x, 60, imgW, imgH, hdcMem, 0, 0, SRCCOPY);
+            SelectObject(hdcMem, hOld);
+            DeleteDC(hdcMem);
+        }
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+    case WM_DESTROY:
+        if (hBmpScaled) { DeleteObject(hBmpScaled); hBmpScaled = NULL; }
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        return 0;
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static void ShowAboutWindow(HWND hParent) {
+    WNDCLASSW wc = { 0 };
+    wc.lpfnWndProc = AboutWndProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"AboutWindow";
+    RegisterClassW(&wc);
+
+    HWND hWnd = CreateWindowW(L"AboutWindow", L"About d2m3u",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        200, 200, 410, 320,
         hParent, NULL, hInst, NULL);
     ShowWindow(hWnd, SW_SHOW);
     UpdateWindow(hWnd);
@@ -474,7 +561,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         int x = 10, y = 10, w = 490, lh = 18, eh = 24, gap = 10;
 
-		//input folder/url
+        //input folder/url
         MakeLabel(hWnd, L"Input Folder / URL:", x, y, w, lh);
         y += lh + 2;
         hEdtInput = CreateWindowW(L"EDIT", L"",
@@ -517,7 +604,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         SendMessage(hChkEmbedAuth, WM_SETFONT, (WPARAM)hFont, TRUE);
         y += eh + gap;
 
-		//output playlsit
+        //output playlsit
         MakeLabel(hWnd, L"Output File:", x, y, w, lh);
         y += lh + 2;
         hEdtOutput = CreateWindowW(L"EDIT", L"",
@@ -540,7 +627,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         SendMessage(hChkSplit, WM_SETFONT, (WPARAM)hFont, TRUE);
         y += eh + gap * 2;
 
-		//run button
+        //run button
         int btnW = 120, btnH = 30;
         hBtnGenerate = CreateWindowW(L"BUTTON", L"Generate",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_TABSTOP,
@@ -616,12 +703,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
 
         case IDM_ABOUT:
-            MessageBoxW(hWnd, 
-                L"d2m3u GUI for Windows\n"
-                L"prod. fujimite\n\n"
-                L"Generates an m3u playlist from a local or web directory."
-                ,
-                L"About", MB_OK);
+            ShowAboutWindow(hWnd);
             break;
 
         case IDM_EXIT:
@@ -662,6 +744,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrev, _In_ LPST
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = hBgBrush;
     wc.lpszClassName = L"MainWindow";
+    wc.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_ICON1));
     RegisterClassW(&wc);
 
     HWND hWnd = CreateWindowW(L"MainWindow", L"d2m3u",
