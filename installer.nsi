@@ -6,7 +6,7 @@
 !define UNINSTALLER "uninstall.exe"
 
 Name "${APP_NAME} ${APP_VERSION}"
-OutFile "x64\Release\d2m3u-gui-setup.exe"
+OutFile "x64\Release\d2m3u-gui-setup-${APP_VERSION}.exe"
 InstallDir "${INSTALL_DIR}"
 RequestExecutionLevel admin
 ShowInstDetails show
