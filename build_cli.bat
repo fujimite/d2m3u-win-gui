@@ -10,6 +10,12 @@ if "%OUT_DIR%"=="" set OUT_DIR=%~dp0x64\%CONFIG%\
 
 if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
 
+:: Skip build if d2m3u.exe already exists in the output directory
+if exist "%OUT_DIR%d2m3u.exe" (
+    echo d2m3u.exe already exists in %OUT_DIR% -- skipping CLI build.
+    goto :licenses
+)
+
 :: Convert paths to Unix-style for MSYS2
 set CLI_DIR=%~dp0d2m3u
 set CLI_DIR_UNIX=%CLI_DIR:\=/%
@@ -36,10 +42,16 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
+:licenses
 :: Release-only: copy licenses into output dir and build installer
 if /i "%CONFIG%"=="Release" (
     set LICENSES_SRC=%~dp0d2m3u\dist\licenses
     set LICENSES_DST=%OUT_DIR%licenses\
+
+    if exist "!LICENSES_DST!" (
+        echo Licenses already exist in !LICENSES_DST! -- skipping copy.
+        goto :done
+    )
 
     echo Copying licenses from !LICENSES_SRC!...
     if not exist "!LICENSES_SRC!" (
@@ -51,7 +63,7 @@ if /i "%CONFIG%"=="Release" (
         echo Failed to copy licenses.
         exit /b 1
     )
-
 )
 
+:done
 echo CLI build complete. Output: %OUT_DIR%
