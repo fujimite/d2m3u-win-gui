@@ -15,6 +15,8 @@
 #define IDM_EXIT        1001
 #define IDM_ABOUT       1002
 #define IDM_SHOWLOG     1003
+#define IDM_OPENFOLDER  1004
+#define IDM_LICENSING   2010
 
 //controls
 #define EDT_INPUT       2001
@@ -26,6 +28,10 @@
 #define BTN_SAVE        2007
 #define CHK_SPLITFOLDER 2008
 #define BTN_GENERATE    2009
+
+//licensing window controls
+#define BTN_CURL_LIC    3001
+#define BTN_FFMPEG_LIC  3002
 
 HINSTANCE hInst;
 HFONT     hFont;
@@ -207,6 +213,77 @@ static void QuotedArg(WCHAR* dst, size_t dstCch, const WCHAR* src) {
         wcsncpy_s(dst, dstCch, src, _TRUNCATE);
 }
 
+static void OpenLicenseFile(HWND hWnd, const WCHAR* filename) {
+    WCHAR bin_dir[MAX_PATH];
+    GetModuleFileNameW(NULL, bin_dir, MAX_PATH);
+    WCHAR* slash = wcsrchr(bin_dir, L'\\');
+    if (slash) *(slash + 1) = L'\0';
+
+    WCHAR path[MAX_PATH];
+    _snwprintf_s(path, MAX_PATH, _TRUNCATE, L"%slicenses\\%s", bin_dir, filename);
+
+    HINSTANCE result = ShellExecuteW(hWnd, L"open", path, NULL, NULL, SW_SHOW);
+    if ((INT_PTR)result <= 32) {
+        MessageBoxW(hWnd, L"Could not open license file.\nMake sure it exists in the licenses\\ subfolder.",
+            L"Error", MB_ICONERROR | MB_OK);
+    }
+}
+
+static LRESULT CALLBACK LicenseWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE: {
+        HFONT hF = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HWND hTxt = CreateWindowW(L"STATIC",
+            L"This software uses the following third-party libraries:\r\n\r\n"
+            L"• curl — licensed under the curl license\r\n"
+            L"• FFmpeg — licensed under the GNU LGPLv2.1\r\n\r\n"
+            L"Click below to view the full license texts:",
+            WS_VISIBLE | WS_CHILD,
+            10, 10, 380, 120, hWnd, NULL, hInst, NULL);
+        SendMessage(hTxt, WM_SETFONT, (WPARAM)hF, TRUE);
+
+        HWND hBtnCurl = CreateWindowW(L"BUTTON", L"View curl License",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_TABSTOP,
+            10, 110, 180, 28, hWnd, (HMENU)BTN_CURL_LIC, hInst, NULL);
+        SendMessage(hBtnCurl, WM_SETFONT, (WPARAM)hF, TRUE);
+
+        HWND hBtnFfmpeg = CreateWindowW(L"BUTTON", L"View FFmpeg License",
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_TABSTOP,
+            200, 110, 180, 28, hWnd, (HMENU)BTN_FFMPEG_LIC, hInst, NULL);
+        SendMessage(hBtnFfmpeg, WM_SETFONT, (WPARAM)hF, TRUE);
+        break;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case BTN_CURL_LIC:
+            OpenLicenseFile(hWnd, L"CURL_LICENSE.txt"); break;
+        case BTN_FFMPEG_LIC:
+            OpenLicenseFile(hWnd, L"FFMPEG_LICENSE.txt"); break;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hWnd); return 0;
+    }
+    return DefWindowProc(hWnd, msg, wParam, lParam);
+}
+
+static void ShowLicenseWindow(HWND hParent) {
+    WNDCLASSW wc = { 0 };
+    wc.lpfnWndProc = LicenseWndProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"LicenseWindow";
+    RegisterClassW(&wc);
+
+    HWND hWnd = CreateWindowW(L"LicenseWindow", L"Licensing",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        200, 200, 410, 188,
+        hParent, NULL, hInst, NULL);
+    ShowWindow(hWnd, SW_SHOW);
+    UpdateWindow(hWnd);
+}
+
 static void RunBase(HWND hWnd) {
     WCHAR* input = calloc(MAX_PATH, sizeof(WCHAR));
     WCHAR* output = calloc(MAX_PATH, sizeof(WCHAR));
@@ -385,9 +462,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         HMENU hMenuBar = CreateMenu();
         hFileMenu = CreatePopupMenu();
         HMENU hHelp = CreatePopupMenu();
+        AppendMenuW(hFileMenu, MF_STRING, IDM_OPENFOLDER, L"&Open Folder...");
         AppendMenuW(hFileMenu, MF_STRING, IDM_SHOWLOG, L"Show &Log");
         AppendMenuW(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(hFileMenu, MF_STRING, IDM_EXIT, L"E&xit");
+        AppendMenuW(hHelp, MF_STRING, IDM_LICENSING, L"&Licensing");
         AppendMenuW(hHelp, MF_STRING, IDM_ABOUT, L"&About");
         AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFileMenu, L"&File");
         AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hHelp, L"&Help");
@@ -399,12 +478,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         MakeLabel(hWnd, L"Input Folder / URL:", x, y, w, lh);
         y += lh + 2;
         hEdtInput = CreateWindowW(L"EDIT", L"",
-            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
             x, y, w - 40, eh,
             hWnd, (HMENU)EDT_INPUT, hInst, NULL);
         SendMessage(hEdtInput, WM_SETFONT, (WPARAM)hFont, TRUE);
         hBtnBrowse = CreateWindowW(L"BUTTON", L"...",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_TABSTOP,
             x + w - 36, y, 30, eh,
             hWnd, (HMENU)BTN_BROWSE, hInst, NULL);
         SendMessage(hBtnBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -414,7 +493,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         hLblUsername = MakeLabel(hWnd, L"Username:", x, y, w, lh);
         y += lh + 2;
         hEdtUsername = CreateWindowW(L"EDIT", L"",
-            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
             x, y, w - 7, eh,
             hWnd, (HMENU)EDT_USERNAME, hInst, NULL);
         SendMessage(hEdtUsername, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -424,7 +503,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         hLblPassword = MakeLabel(hWnd, L"Password:", x, y, w, lh);
         y += lh + 2;
         hEdtPassword = CreateWindowW(L"EDIT", L"",
-            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD,
+            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP,
             x, y, w - 7, eh,
             hWnd, (HMENU)EDT_PASSWORD, hInst, NULL);
         SendMessage(hEdtPassword, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -432,7 +511,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         //-e flag
         hChkEmbedAuth = CreateWindowW(L"BUTTON", L"Embed authentication",
-            WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+            WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX | WS_TABSTOP,
             x, y, w, eh,
             hWnd, (HMENU)CHK_EMBEDAUTH, hInst, NULL);
         SendMessage(hChkEmbedAuth, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -442,7 +521,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         MakeLabel(hWnd, L"Output File:", x, y, w, lh);
         y += lh + 2;
         hEdtOutput = CreateWindowW(L"EDIT", L"",
-            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+            WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
             x, y, w - 40, eh,
             hWnd, (HMENU)EDT_OUTPUT, hInst, NULL);
         SendMessage(hEdtOutput, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -455,7 +534,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         //-s flag
         hChkSplit = CreateWindowW(L"BUTTON", L"Split by folder",
-            WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+            WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX | WS_TABSTOP,
             x, y, w, eh,
             hWnd, (HMENU)CHK_SPLITFOLDER, hInst, NULL);
         SendMessage(hChkSplit, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -464,7 +543,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 		//run button
         int btnW = 120, btnH = 30;
         hBtnGenerate = CreateWindowW(L"BUTTON", L"Generate",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_TABSTOP,
             x + w / 2 - btnW / 2, y, btnW, btnH,
             hWnd, (HMENU)BTN_GENERATE, hInst, NULL);
         SendMessage(hBtnGenerate, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -515,6 +594,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             RunBase(hWnd);
             break;
 
+        case IDM_OPENFOLDER: {
+            WCHAR path[MAX_PATH] = { 0 };
+            if (BrowseForFolder(hWnd, path, MAX_PATH))
+                SetWindowTextW(hEdtInput, path);
+            break;
+        }
+
         case IDM_SHOWLOG: {
             bLogVisible = !bLogVisible;
             ShowWindow(hWndLog, bLogVisible ? SW_SHOW : SW_HIDE);
@@ -525,13 +611,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         }
 
+        case IDM_LICENSING:
+            ShowLicenseWindow(hWnd);
+            break;
+
         case IDM_ABOUT:
             MessageBoxW(hWnd, 
                 L"d2m3u GUI for Windows\n"
                 L"prod. fujimite\n\n"
-                L"Generates an m3u playlist from a local or web directory.\n\n"
-                L"This software uses curl, under the curl license.\n"
-                L"This software uses libraries from the FFmpeg project under the LGPLv2.1"
+                L"Generates an m3u playlist from a local or web directory."
                 ,
                 L"About", MB_OK);
             break;
@@ -586,8 +674,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrev, _In_ LPST
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        if (!IsDialogMessage(hWnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
     }
 
     CoUninitialize();
