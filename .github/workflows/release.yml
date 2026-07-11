@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g. v0.3)'
+        required: true
+        type: string
+      draft:
+        description: 'Create as draft release'
+        required: false
+        type: boolean
+        default: true
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-gui:
+    name: Build windows-x86_64 (GUI installer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-ffmpeg
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-nsis
+            zip
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build installer (Release|x64)
+        shell: cmd
+        run: |
+          set "VERSION_IN=${{ inputs.version }}"
+          if "%VERSION_IN:~0,1%"=="v" (set "VERSION_NUM=%VERSION_IN:~1%") else (set "VERSION_NUM=%VERSION_IN%")
+          msbuild d2m3u-win-gui.vcxproj /p:Configuration=Release /p:Platform=x64 /p:APP_VERSION=%VERSION_NUM% /m
+
+      - name: Package
+        shell: msys2 {0}
+        run: |
+          mkdir -p out
+          installer_file=$(ls x64/Release/d2m3u-gui-setup*.exe | head -n1)
+          zip -j "out/d2m3u-gui-${{ inputs.version }}-windows-x86_64.zip" "$installer_file"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: out/*.zip
+
+  release:
+    name: Create release
+    needs: build-windows-gui
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-x86_64
+          path: artifacts
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          files: artifacts/*.zip

@@ -70,6 +70,9 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <APP_VERSION Condition="'$(APP_VERSION)'==''">0.0</APP_VERSION>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <TargetName>d2m3u-gui</TargetName>
   </PropertyGroup>
@@ -134,7 +137,7 @@
       <Command>call "$(SolutionDir)build_cli.bat" $(Configuration)</Command>
     </PreBuildEvent>
     <PostBuildEvent>
-      <Command>"C:\msys64\mingw64\bin\makensis.exe" "$(ProjectDir)installer.nsi"</Command>
+      <Command>"C:\msys64\mingw64\bin\makensis.exe" "-DAPP_VERSION=$(APP_VERSION)" "$(ProjectDir)installer.nsi"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
