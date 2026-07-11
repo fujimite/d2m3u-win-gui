@@ -15,11 +15,11 @@ goto :licenses
 
 set CLI_DIR=%~dp0d2m3u
 
-:: Convert paths to Unix-style for MSYS2 via cygpath, so this works regardless
-:: of which drive letter the repo happens to be checked out on (e.g. D: on
-:: GitHub Actions runners, not just C:).
-for /f "usebackq delims=" %%i in (`"%MSYS2%\usr\bin\bash.exe" -c "cygpath -u '%CLI_DIR%'"`) do set CLI_DIR_UNIX=%%i
-for /f "usebackq delims=" %%i in (`"%MSYS2%\usr\bin\bash.exe" -c "cygpath -u '%OUT_DIR%'"`) do set OUT_DIR_UNIX=%%i
+:: Convert paths to Unix-style for MSYS2. Done in pure batch (no cygpath
+:: shellout) so it works regardless of which drive the repo happens to be
+:: checked out on (e.g. D: on GitHub Actions runners, not just C:).
+call :winToUnix "%CLI_DIR%" CLI_DIR_UNIX
+call :winToUnix "%OUT_DIR%" OUT_DIR_UNIX
 
 echo Building d2m3u.exe (%CONFIG%) via MinGW...
 echo CLI_DIR: %CLI_DIR% (%CLI_DIR_UNIX%)
@@ -37,6 +37,46 @@ if %ERRORLEVEL% neq 0 (
 echo CLI build FAILED.
 exit /b 1
 )
+
+goto :licenses
+
+:winToUnix
+:: %~1 = Windows path, %~2 = name of variable to receive the MSYS-style path.
+:: Converts "D:\a\foo\bar" (any drive letter, any case) to "/d/a/foo/bar"
+:: without any external tools.
+setlocal
+set "WPATH=%~1"
+set "d=%WPATH:~0,1%"
+set "d=%d:A=a%"
+set "d=%d:B=b%"
+set "d=%d:C=c%"
+set "d=%d:D=d%"
+set "d=%d:E=e%"
+set "d=%d:F=f%"
+set "d=%d:G=g%"
+set "d=%d:H=h%"
+set "d=%d:I=i%"
+set "d=%d:J=j%"
+set "d=%d:K=k%"
+set "d=%d:L=l%"
+set "d=%d:M=m%"
+set "d=%d:N=n%"
+set "d=%d:O=o%"
+set "d=%d:P=p%"
+set "d=%d:Q=q%"
+set "d=%d:R=r%"
+set "d=%d:S=s%"
+set "d=%d:T=t%"
+set "d=%d:U=u%"
+set "d=%d:V=v%"
+set "d=%d:W=w%"
+set "d=%d:X=x%"
+set "d=%d:Y=y%"
+set "d=%d:Z=z%"
+set "UPATH=%WPATH:\=/%"
+set "UPATH=/%d%%UPATH:~2%"
+endlocal & set "%~2=%UPATH%"
+goto :eof
 
 :licenses
 :: Release-only: copy licenses into output dir and build installer
