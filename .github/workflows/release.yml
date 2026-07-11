@@ -33,6 +33,7 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
+          release: false
           update: true
           install: >-
             make
@@ -41,6 +42,13 @@ jobs:
             mingw-w64-x86_64-curl
             mingw-w64-x86_64-nsis
             zip
+
+      - name: Verify MSYS2 packages landed at C:\msys64
+        shell: msys2 {0}
+        run: |
+          pacman -Q mingw-w64-x86_64-ffmpeg mingw-w64-x86_64-curl mingw-w64-x86_64-nsis
+          test -f /mingw64/include/libavformat/avformat.h
+          test -f /mingw64/bin/makensis.exe
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
