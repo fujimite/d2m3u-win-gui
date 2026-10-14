@@ -38,6 +38,20 @@
 #define INPUT_CCH       2048
 #define CMD_CCH         32768 //CreateProcess limit
 
+//worker thread messages
+#define WM_APP_LOG      (WM_APP + 1) //lParam: heap string, receiver frees
+#define WM_APP_DONE     (WM_APP + 2) //lParam: RunJob, receiver frees
+
+//a running d2m3u process. hProcess is closed and the job freed by FinishRun
+typedef struct {
+    HWND hWnd;
+    HANDLE hProcess;
+    HANDLE hReadPipe;
+    DWORD exitCode;
+    const WCHAR* outputError; //first problem reading output, NULL if none
+    WCHAR outputDir[MAX_PATH];
+} RunJob;
+
 HINSTANCE hInst;
 HFONT     hFont;
 HBRUSH    hBgBrush;
@@ -59,6 +73,13 @@ HWND hBtnGenerate;
 HWND hWndLog = NULL;
 HWND hEdtLog = NULL;
 BOOL bLogVisible = FALSE;
+
+//one instance each of the licensing and about windows
+HWND hWndLicense = NULL;
+HWND hWndAbout = NULL;
+
+//only touched on the ui thread
+RunJob* pRunJob = NULL;
 
 static BOOL IsUrl(const WCHAR* text) {
     return (wcsncmp(text, L"http://", 7) == 0 ||
@@ -121,12 +142,14 @@ static BOOL HasInvalidPathChars(const WCHAR* path) {
 }
 
 //returns NULL on success with the full path in dst, otherwise the message to show.
-//a relative path is placed next to the input and an existing folder gets playlist.m3u
+//a relative path is placed next to the input, an existing folder gets playlist.m3u
+//and .m3u is appended when missing so dst is exactly what d2m3u writes
 static const WCHAR* ResolveOutputPath(const WCHAR* input, BOOL inputIsUrl,
     const WCHAR* output, WCHAR* dst, size_t dstCch) {
     WCHAR joined[MAX_PATH * 2];
     WCHAR parent[MAX_PATH];
     DWORD len;
+    size_t n;
 
     if (HasInvalidPathChars(output))
         return L"The output path contains characters that are not allowed in file names.";
@@ -160,13 +183,20 @@ static const WCHAR* ResolveOutputPath(const WCHAR* input, BOOL inputIsUrl,
     if (wcsncmp(dst, L"\\\\.\\", 4) == 0)
         return L"The output file name is reserved by Windows.";
 
+    n = wcslen(dst);
     if (IsDirectory(dst)) {
-        size_t n = wcslen(dst);
         if (_snwprintf_s(dst + n, dstCch - n, _TRUNCATE, L"%splaylist.m3u",
             dst[n - 1] == L'\\' ? L"" : L"\\") < 0)
             return L"The output path is too long.";
         return NULL;
     }
+
+    if (n < 4 || _wcsicmp(dst + n - 4, L".m3u") != 0) {
+        if (wcsncat_s(dst, dstCch, L".m3u", _TRUNCATE) != 0)
+            return L"The output path is too long.";
+    }
+    if (IsDirectory(dst))
+        return L"A folder with the output name already exists.";
 
     if (wcsncpy_s(parent, ARRAYSIZE(parent), dst, _TRUNCATE) != 0)
         return L"The output path is too long.";
@@ -177,6 +207,34 @@ static const WCHAR* ResolveOutputPath(const WCHAR* input, BOOL inputIsUrl,
     return NULL;
 }
 
+static BOOL AnyFileMatches(const WCHAR* pattern) {
+    WIN32_FIND_DATAW find_data;
+    HANDLE find_handle = FindFirstFileW(pattern, &find_data);
+    if (find_handle == INVALID_HANDLE_VALUE)
+        return FALSE;
+    FindClose(find_handle);
+    return TRUE;
+}
+
+//true if going to overwite. check splitting
+static BOOL OutputExists(const WCHAR* output, BOOL splitting) {
+    WCHAR dir[MAX_PATH];
+    WCHAR pattern[MAX_PATH + 8];
+
+    if (!splitting)
+        return AnyFileMatches(output);
+
+    if (wcsncpy_s(dir, ARRAYSIZE(dir), output, _TRUNCATE) != 0)
+        return TRUE;
+    StripFileName(dir);
+    const WCHAR* name = output + wcslen(dir);
+
+    if (_snwprintf_s(pattern, ARRAYSIZE(pattern), _TRUNCATE, L"%s??_%s", dir, name) < 0 ||
+        AnyFileMatches(pattern))
+        return TRUE;
+    return FALSE;
+}
+
 static void UpdateAuthFields(HWND hWnd) {
     WCHAR text[1024];
     GetWindowTextW(hEdtInput, text, 1024);
@@ -185,6 +243,7 @@ static void UpdateAuthFields(HWND hWnd) {
     EnableWindow(hEdtPassword, url_mode);
     EnableWindow(hLblUsername, url_mode);
     EnableWindow(hLblPassword, url_mode);
+    EnableWindow(hChkEmbedAuth, url_mode);
 }
 
 static HWND MakeLabel(HWND hWnd, const WCHAR* text, int x, int y, int w, int h) {
@@ -241,7 +300,7 @@ static BOOL BrowseForSaveFile(HWND hWnd, WCHAR* outPath, DWORD outSize) {
 
     DWORD opts;
     pDlg->lpVtbl->GetOptions(pDlg, &opts);
-    pDlg->lpVtbl->SetOptions(pDlg, opts | FOS_OVERWRITEPROMPT | FOS_FORCEFILESYSTEM);
+    pDlg->lpVtbl->SetOptions(pDlg, opts | FOS_FORCEFILESYSTEM);
 
     if (SUCCEEDED(pDlg->lpVtbl->Show(pDlg, hWnd))) {
         IShellItem* pItem = NULL;
@@ -408,6 +467,9 @@ static LRESULT CALLBACK LicenseWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
             OpenLicenseFile(hWnd, L"FFMPEG_LICENSE.txt"); break;
         }
         break;
+    case WM_DESTROY:
+        hWndLicense = NULL;
+        return 0;
     case WM_CLOSE:
         DestroyWindow(hWnd); return 0;
     }
@@ -415,6 +477,11 @@ static LRESULT CALLBACK LicenseWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
 }
 
 static void ShowLicenseWindow(HWND hParent) {
+    if (hWndLicense) {
+        SetForegroundWindow(hWndLicense);
+        return;
+    }
+
     WNDCLASSW wc = { 0 };
     wc.lpfnWndProc = LicenseWndProc;
     wc.hInstance = hInst;
@@ -423,12 +490,12 @@ static void ShowLicenseWindow(HWND hParent) {
     wc.lpszClassName = L"LicenseWindow";
     RegisterClassW(&wc);
 
-    HWND hWnd = CreateWindowW(L"LicenseWindow", L"Licensing",
+    hWndLicense = CreateWindowW(L"LicenseWindow", L"Licensing",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         200, 200, 410, 188,
         hParent, NULL, hInst, NULL);
-    ShowWindow(hWnd, SW_SHOW);
-    UpdateWindow(hWnd);
+    ShowWindow(hWndLicense, SW_SHOW);
+    UpdateWindow(hWndLicense);
 }
 
 static LRESULT CALLBACK AboutWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -438,9 +505,6 @@ static LRESULT CALLBACK AboutWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     switch (msg) {
     case WM_CREATE: {
         HBITMAP hBmpOrig = LoadBitmapW(hInst, MAKEINTRESOURCE(IDB_BITMAP1));
-        if (!hBmpOrig) {
-            MessageBoxW(hWnd, L"Failed to load bitmap", L"Debug", MB_OK);
-        }
         if (hBmpOrig) {
             BITMAP bm;
             GetObject(hBmpOrig, sizeof(bm), &bm);
@@ -492,6 +556,7 @@ static LRESULT CALLBACK AboutWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
     }
     case WM_DESTROY:
         if (hBmpScaled) { DeleteObject(hBmpScaled); hBmpScaled = NULL; }
+        hWndAbout = NULL;
         return 0;
     case WM_CLOSE:
         DestroyWindow(hWnd);
@@ -501,6 +566,11 @@ static LRESULT CALLBACK AboutWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM 
 }
 
 static void ShowAboutWindow(HWND hParent) {
+    if (hWndAbout) {
+        SetForegroundWindow(hWndAbout);
+        return;
+    }
+
     WNDCLASSW wc = { 0 };
     wc.lpfnWndProc = AboutWndProc;
     wc.hInstance = hInst;
@@ -509,12 +579,89 @@ static void ShowAboutWindow(HWND hParent) {
     wc.lpszClassName = L"AboutWindow";
     RegisterClassW(&wc);
 
-    HWND hWnd = CreateWindowW(L"AboutWindow", L"About d2m3u",
+    hWndAbout = CreateWindowW(L"AboutWindow", L"About d2m3u",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         200, 200, 410, 320,
         hParent, NULL, hInst, NULL);
-    ShowWindow(hWnd, SW_SHOW);
-    UpdateWindow(hWnd);
+    ShowWindow(hWndAbout, SW_SHOW);
+    UpdateWindow(hWndAbout);
+}
+
+//forwards d2m3u verbose output to the ui thread until the pipe closes
+static DWORD WINAPI ReadOutputThread(LPVOID param) {
+    RunJob* job = (RunJob*)param;
+    char buf[1024];
+    DWORD bytesRead;
+
+    while (ReadFile(job->hReadPipe, buf, sizeof(buf), &bytesRead, NULL) && bytesRead > 0) {
+        WCHAR* text = malloc((bytesRead + 1) * sizeof(WCHAR));
+        if (!text) {
+            if (!job->outputError)
+                job->outputError = L"Ran out of memory while reading the output of d2m3u";
+            continue;
+        }
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, buf, (int)bytesRead, text, (int)bytesRead);
+        if (wlen <= 0) {
+            free(text);
+            if (!job->outputError)
+                job->outputError = L"The output of d2m3u could not be converted to text";
+            continue;
+        }
+        text[wlen] = L'\0';
+        if (!PostMessage(job->hWnd, WM_APP_LOG, 0, (LPARAM)text))
+            free(text);
+    }
+
+    CloseHandle(job->hReadPipe);
+    WaitForSingleObject(job->hProcess, INFINITE);
+    GetExitCodeProcess(job->hProcess, &job->exitCode);
+
+    //the window is gone if posting fails, nobody else will free the job
+    if (!PostMessage(job->hWnd, WM_APP_DONE, 0, (LPARAM)job)) {
+        CloseHandle(job->hProcess);
+        free(job);
+    }
+    return 0;
+}
+
+static void FinishRun(HWND hWnd, RunJob* job) {
+    DWORD exit_code = job->exitCode;
+    const WCHAR* output_error = job->outputError; //string no heap
+    WCHAR output_dir[MAX_PATH];
+    WCHAR log_note[256] = L"";
+    wcsncpy_s(output_dir, ARRAYSIZE(output_dir), job->outputDir, _TRUNCATE);
+    if (output_error) {
+        _snwprintf_s(log_note, ARRAYSIZE(log_note), _TRUNCATE,
+            L"\n\nLog warning: %s, so some of the log is missing.", output_error);
+    }
+
+    CloseHandle(job->hProcess);
+    free(job);
+    pRunJob = NULL;
+
+    EnableWindow(hBtnGenerate, TRUE);
+    SetWindowTextW(hBtnGenerate, L"Generate");
+
+    if (exit_code == 0) {
+        WCHAR msg[MAX_PATH + 320];
+        _snwprintf_s(msg, ARRAYSIZE(msg), _TRUNCATE,
+            L"Playlist generated successfully.\n\nSaved in:\n%s%s", output_dir, log_note);
+        MessageBoxW(hWnd, msg, L"Done", output_error ? MB_ICONWARNING | MB_OK : MB_ICONINFORMATION | MB_OK);
+    }
+    else {
+        WCHAR msg[384];
+        _snwprintf_s(msg, ARRAYSIZE(msg), _TRUNCATE,
+            L"d2m3u.exe exited with code %lu.\nCheck the log for details.%s", exit_code, log_note);
+        MessageBoxW(hWnd, msg, L"Error", MB_ICONERROR | MB_OK);
+        if (!bLogVisible) {
+            bLogVisible = TRUE;
+            ShowWindow(hWndLog, SW_SHOW);
+            MENUITEMINFOW mii = { sizeof(mii) };
+            mii.fMask = MIIM_STATE;
+            mii.fState = MFS_CHECKED;
+            SetMenuItemInfoW(hFileMenu, IDM_SHOWLOG, FALSE, &mii);
+        }
+    }
 }
 
 static void RunBase(HWND hWnd) {
@@ -575,8 +722,30 @@ static void RunBase(HWND hWnd) {
         goto cleanup;
     }
 
-    BOOL embedAuth = (SendMessage(hChkEmbedAuth, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    BOOL embedAuth = inputIsUrl && (SendMessage(hChkEmbedAuth, BM_GETCHECK, 0, 0) == BST_CHECKED);
     BOOL splitDir = (SendMessage(hChkSplit, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+    BOOL splitting = splitDir && (inputIsUrl || IsDirectory(full_input));
+    if (OutputExists(full_output, splitting)) {
+        WCHAR* overwrite_msg = calloc(MAX_PATH + 128, sizeof(WCHAR));
+        if (!overwrite_msg) {
+            MessageBoxW(hWnd, L"Out of memory.", L"Error", MB_ICONERROR | MB_OK);
+            goto cleanup;
+        }
+        //split playlists are numbered, so name the folder instead of the typed file
+        WCHAR shown[MAX_PATH];
+        wcsncpy_s(shown, ARRAYSIZE(shown), full_output, _TRUNCATE);
+        if (splitting)
+            StripFileName(shown);
+        _snwprintf_s(overwrite_msg, MAX_PATH + 128, _TRUNCATE,
+            splitting ? L"Playlists with this name already exist in this folder and will be overwritten:\n\n%s\n\nContinue?"
+            : L"This file already exists and will be overwritten:\n\n%s\n\nContinue?",
+            shown);
+        int answer = MessageBoxW(hWnd, overwrite_msg, L"Overwrite", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2);
+        free(overwrite_msg);
+        if (answer != IDYES)
+            goto cleanup;
+    }
 
     GetModuleFileNameW(NULL, bin_dir, MAX_PATH);
     WCHAR* lastSlash = wcsrchr(bin_dir, L'\\');
@@ -658,58 +827,31 @@ static void RunBase(HWND hWnd) {
     }
 
     CloseHandle(hWritePipe);
-
-    EnableWindow(hBtnGenerate, FALSE);
-    SetWindowTextW(hBtnGenerate, L"Generating...");
-
-    char buf[1024];
-    DWORD bytesRead;
-    while (ReadFile(hReadPipe, buf, sizeof(buf), &bytesRead, NULL) && bytesRead > 0) {
-        WCHAR wbuf[2048];
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, buf, (int)bytesRead, wbuf, ARRAYSIZE(wbuf) - 1);
-        if (wlen > 0) {
-            wbuf[wlen] = L'\0';
-            LogPrint(wbuf);
-        }
-
-        MSG msg;
-        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
-    }
-
-    CloseHandle(hReadPipe);
-
-    DWORD exit_code = 0;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    EnableWindow(hBtnGenerate, TRUE);
-    SetWindowTextW(hBtnGenerate, L"Generate");
+    RunJob* job = calloc(1, sizeof(RunJob));
+    HANDLE hThread = NULL;
+    if (job) {
+        job->hWnd = hWnd;
+        job->hProcess = pi.hProcess;
+        job->hReadPipe = hReadPipe;
+        wcsncpy_s(job->outputDir, ARRAYSIZE(job->outputDir), full_output, _TRUNCATE);
+        StripFileName(job->outputDir);
+        hThread = CreateThread(NULL, 0, ReadOutputThread, job, 0, NULL);
+    }
+    if (!hThread) {
+        MessageBoxW(hWnd, L"Failed to start the worker thread.", L"Error", MB_ICONERROR | MB_OK);
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hProcess);
+        CloseHandle(hReadPipe);
+        free(job);
+        goto cleanup;
+    }
+    CloseHandle(hThread);
 
-    if (exit_code == 0) {
-        WCHAR msg[MAX_PATH + 64];
-        StripFileName(full_output);
-        _snwprintf_s(msg, ARRAYSIZE(msg), _TRUNCATE,
-            L"Playlist generated successfully.\n\nSaved in:\n%s", full_output);
-        MessageBoxW(hWnd, msg, L"Done", MB_ICONINFORMATION | MB_OK);
-    }
-    else {
-        WCHAR msg[128];
-        _snwprintf_s(msg, ARRAYSIZE(msg), _TRUNCATE,
-            L"d2m3u.exe exited with code %lu.\nCheck the log for details.", exit_code);
-        MessageBoxW(hWnd, msg, L"Error", MB_ICONERROR | MB_OK);
-        if (!bLogVisible) {
-            bLogVisible = TRUE;
-            ShowWindow(hWndLog, SW_SHOW);
-            MENUITEMINFOW mii = { sizeof(mii) };
-            mii.fMask = MIIM_STATE;
-            mii.fState = MFS_CHECKED;
-            SetMenuItemInfoW(hFileMenu, IDM_SHOWLOG, FALSE, &mii);
-        }
-    }
+    pRunJob = job;
+    EnableWindow(hBtnGenerate, FALSE);
+    SetWindowTextW(hBtnGenerate, L"Generating...");
 
 cleanup:
     free(input);
@@ -899,12 +1041,31 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
 
         case IDM_EXIT:
-            DestroyWindow(hWnd);
+            SendMessage(hWnd, WM_CLOSE, 0, 0);
             break;
         }
         break;
 
+    case WM_APP_LOG:
+        LogPrint((const WCHAR*)lParam);
+        free((void*)lParam);
+        return 0;
+
+    case WM_APP_DONE:
+        FinishRun(hWnd, (RunJob*)lParam);
+        return 0;
+
+    case WM_CLOSE:
+        if (pRunJob && MessageBoxW(hWnd, L"d2m3u is still running. Stop it and exit?",
+            L"Exit", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES)
+            return 0;
+        DestroyWindow(hWnd);
+        return 0;
+
     case WM_DESTROY:
+        //unemployement time
+        if (pRunJob)
+            TerminateProcess(pRunJob->hProcess, 1);
         DeleteObject(hFont);
         DeleteObject(hBgBrush);
         PostQuitMessage(0);
