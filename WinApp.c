@@ -34,6 +34,10 @@
 #define BTN_CURL_LIC    3001
 #define BTN_FFMPEG_LIC  3002
 
+//buffer sizes in characters
+#define INPUT_CCH       2048
+#define CMD_CCH         32768 //CreateProcess limit
+
 HINSTANCE hInst;
 HFONT     hFont;
 HBRUSH    hBgBrush;
@@ -60,6 +64,117 @@ static BOOL IsUrl(const WCHAR* text) {
     return (wcsncmp(text, L"http://", 7) == 0 ||
         wcsncmp(text, L"https://", 8) == 0);
     //could add ftp support? but need to add in base first
+}
+
+//strips whitespace and the quotes added by explorer's "Copy as path"
+static void TrimPath(WCHAR* text) {
+    size_t len = wcslen(text);
+    size_t start = 0;
+
+    while (len > 0 && text[len - 1] <= L' ')
+        text[--len] = L'\0';
+    while (text[start] && text[start] <= L' ')
+        start++;
+    if (start > 0) {
+        memmove(text, text + start, (len - start + 1) * sizeof(WCHAR));
+        len -= start;
+    }
+    if (len >= 2 && text[0] == L'"' && text[len - 1] == L'"') {
+        memmove(text, text + 1, (len - 2) * sizeof(WCHAR));
+        text[len - 2] = L'\0';
+    }
+}
+
+static BOOL IsDriveLetter(WCHAR c) {
+    return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z');
+}
+
+//C:\blabla or \\server\share
+static BOOL IsAbsolutePath(const WCHAR* path) {
+    if (IsDriveLetter(path[0]) && path[1] == L':')
+        return path[2] == L'\\' || path[2] == L'/';
+    return (path[0] == L'\\' || path[0] == L'/') &&
+        (path[1] == L'\\' || path[1] == L'/');
+}
+
+static BOOL IsDirectory(const WCHAR* path) {
+    DWORD attr = GetFileAttributesW(path);
+    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+//drops the last component, keeps the trailing separator
+static void StripFileName(WCHAR* path) {
+    WCHAR* slash = wcsrchr(path, L'\\');
+    if (slash)
+        *(slash + 1) = L'\0';
+}
+
+static BOOL HasInvalidPathChars(const WCHAR* path) {
+    for (size_t i = 0; path[i]; i++) {
+        WCHAR c = path[i];
+        if (c < L' ' || wcschr(L"<>\"|?*", c))
+            return TRUE;
+        if (c == L':' && !(i == 1 && IsDriveLetter(path[0]) && IsAbsolutePath(path)))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+//returns NULL on success with the full path in dst, otherwise the message to show.
+//a relative path is placed next to the input and an existing folder gets playlist.m3u
+static const WCHAR* ResolveOutputPath(const WCHAR* input, BOOL inputIsUrl,
+    const WCHAR* output, WCHAR* dst, size_t dstCch) {
+    WCHAR joined[MAX_PATH * 2];
+    WCHAR parent[MAX_PATH];
+    DWORD len;
+
+    if (HasInvalidPathChars(output))
+        return L"The output path contains characters that are not allowed in file names.";
+
+    if (IsAbsolutePath(output)) {
+        if (wcsncpy_s(joined, ARRAYSIZE(joined), output, _TRUNCATE) != 0)
+            return L"The output path is too long.";
+    }
+    else {
+        WCHAR base[MAX_PATH];
+        size_t base_len;
+
+        if (inputIsUrl)
+            return L"When the input is a URL, the output must be a full path, for example C:\\Music\\playlist.m3u";
+        if (wcsncpy_s(base, ARRAYSIZE(base), input, _TRUNCATE) != 0)
+            return L"The input path is too long.";
+        if (!IsDirectory(base))
+            StripFileName(base); //input is a single file
+        base_len = wcslen(base);
+        if (base_len == 0 || !IsDirectory(base))
+            return L"The input folder does not exist.";
+        if (_snwprintf_s(joined, ARRAYSIZE(joined), _TRUNCATE, L"%s%s%s", base,
+            base[base_len - 1] == L'\\' ? L"" : L"\\", output) < 0)
+            return L"The output path is too long.";
+    }
+
+    len = GetFullPathNameW(joined, (DWORD)dstCch, dst, NULL);
+    if (len == 0 || len >= dstCch)
+        return L"The output path is invalid or too long.";
+    //names like NUL or CON resolve to a device path
+    if (wcsncmp(dst, L"\\\\.\\", 4) == 0)
+        return L"The output file name is reserved by Windows.";
+
+    if (IsDirectory(dst)) {
+        size_t n = wcslen(dst);
+        if (_snwprintf_s(dst + n, dstCch - n, _TRUNCATE, L"%splaylist.m3u",
+            dst[n - 1] == L'\\' ? L"" : L"\\") < 0)
+            return L"The output path is too long.";
+        return NULL;
+    }
+
+    if (wcsncpy_s(parent, ARRAYSIZE(parent), dst, _TRUNCATE) != 0)
+        return L"The output path is too long.";
+    StripFileName(parent);
+    if (!IsDirectory(parent))
+        return L"The folder for the output file does not exist.";
+
+    return NULL;
 }
 
 static void UpdateAuthFields(HWND hWnd) {
@@ -188,7 +303,7 @@ static void CreateLogWindow(HWND hParent) {
     wc.lpszClassName = L"LogWindow";
     RegisterClassW(&wc);
 
-    hWndLog = CreateWindowW(L"LogWindow", L"d2m3u � Log",
+    hWndLog = CreateWindowW(L"LogWindow", L"d2m3u - Log",
         WS_OVERLAPPEDWINDOW,
         150, 150, 600, 400,
         hParent, NULL, hInst, NULL);
@@ -198,6 +313,8 @@ static void CreateLogWindow(HWND hParent) {
         ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
         0, 0, 600, 400,
         hWndLog, NULL, hInst, NULL);
+    //override 30k limit to avoid truncation
+    SendMessage(hEdtLog, EM_LIMITTEXT, 0, 0);
 
     HFONT hMono = CreateFontW( //steeze
         -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -207,11 +324,40 @@ static void CreateLogWindow(HWND hParent) {
     SendMessage(hEdtLog, WM_SETFONT, (WPARAM)hMono, TRUE);
 }
 
-static void QuotedArg(WCHAR* dst, size_t dstCch, const WCHAR* src) {
-    if (wcschr(src, L' ') || wcschr(src, L'\t'))
-        _snwprintf_s(dst, dstCch, _TRUNCATE, L"\"%s\"", src);
-    else
-        wcsncpy_s(dst, dstCch, src, _TRUNCATE);
+//quotes by the CRT argv rules so backslashes and quotes survive. false if dst is too small
+static BOOL QuotedArg(WCHAR* dst, size_t dstCch, const WCHAR* src) {
+    size_t len = 0;
+
+    if (dstCch < 3)
+        return FALSE;
+    dst[len++] = L'"';
+
+    for (;;) {
+        size_t slashes = 0;
+        while (*src == L'\\') {
+            slashes++;
+            src++;
+        }
+
+        //backslashes before a quote or the closing quote have to be doubled
+        size_t run = slashes;
+        if (*src == L'\0' || *src == L'"')
+            run = slashes * 2;
+        if (*src == L'"')
+            run++;
+        if (len + run + 3 > dstCch)
+            return FALSE;
+        for (size_t i = 0; i < run; i++)
+            dst[len++] = L'\\';
+
+        if (*src == L'\0')
+            break;
+        dst[len++] = *src++;
+    }
+
+    dst[len++] = L'"';
+    dst[len] = L'\0';
+    return TRUE;
 }
 
 static void OpenLicenseFile(HWND hWnd, const WCHAR* filename) {
@@ -236,8 +382,8 @@ static LRESULT CALLBACK LicenseWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
         HFONT hF = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HWND hTxt = CreateWindowW(L"STATIC",
             L"This software uses the following third-party libraries:\r\n\r\n"
-            L"� curl � licensed under the curl license\r\n"
-            L"� FFmpeg � licensed under the GNU LGPLv2.1\r\n\r\n"
+            L"curl licensed under the curl license\r\n"
+            L"FFmpeg licensed under the GNU LGPLv2.1\r\n\r\n"
             L"Click below to view the full license texts:",
             WS_VISIBLE | WS_CHILD,
             10, 10, 380, 120, hWnd, NULL, hInst, NULL);
@@ -372,28 +518,32 @@ static void ShowAboutWindow(HWND hParent) {
 }
 
 static void RunBase(HWND hWnd) {
-    WCHAR* input = calloc(MAX_PATH, sizeof(WCHAR));
+    WCHAR* input = calloc(INPUT_CCH, sizeof(WCHAR));
+    WCHAR* full_input = calloc(INPUT_CCH, sizeof(WCHAR));
     WCHAR* output = calloc(MAX_PATH, sizeof(WCHAR));
+    WCHAR* full_output = calloc(MAX_PATH, sizeof(WCHAR));
     WCHAR* username = calloc(256, sizeof(WCHAR));
     WCHAR* password = calloc(256, sizeof(WCHAR));
     WCHAR* bin_dir = calloc(MAX_PATH, sizeof(WCHAR));
     WCHAR* bin_path = calloc(MAX_PATH, sizeof(WCHAR));
-    WCHAR* cmd_buf = calloc(4096, sizeof(WCHAR));
-    WCHAR* quoted_input = calloc(MAX_PATH + 2, sizeof(WCHAR));
-    WCHAR* quoted_output = calloc(MAX_PATH + 2, sizeof(WCHAR));
-    WCHAR* quoted_bin = calloc(MAX_PATH + 2, sizeof(WCHAR));
-    WCHAR* pos_buf = calloc(MAX_PATH * 2 + 8, sizeof(WCHAR));
+    WCHAR* cmd_buf = calloc(CMD_CCH, sizeof(WCHAR));
+    WCHAR* quoted_input = calloc(INPUT_CCH * 2 + 4, sizeof(WCHAR));
+    WCHAR* quoted_output = calloc(MAX_PATH * 2 + 4, sizeof(WCHAR));
+    WCHAR* quoted_bin = calloc(MAX_PATH * 2 + 4, sizeof(WCHAR));
 
-    if (!input || !output || !username || !password || !bin_dir ||
-        !bin_path || !cmd_buf || !quoted_input || !quoted_output || !quoted_bin || !pos_buf) {
+    if (!input || !full_input || !output || !full_output || !username ||
+        !password || !bin_dir || !bin_path || !cmd_buf || !quoted_input ||
+        !quoted_output || !quoted_bin) {
         MessageBoxW(hWnd, L"Out of memory.", L"Error", MB_ICONERROR | MB_OK);
         goto cleanup;
     }
 
-    GetWindowTextW(hEdtInput, input, MAX_PATH);
+    GetWindowTextW(hEdtInput, input, INPUT_CCH);
     GetWindowTextW(hEdtOutput, output, MAX_PATH);
     GetWindowTextW(hEdtUsername, username, 256);
     GetWindowTextW(hEdtPassword, password, 256);
+    TrimPath(input);
+    TrimPath(output);
 
     if (wcslen(input) == 0) {
         MessageBoxW(hWnd, L"Please enter an input folder or URL.", L"Missing Input", MB_ICONWARNING | MB_OK);
@@ -401,6 +551,27 @@ static void RunBase(HWND hWnd) {
     }
     if (wcslen(output) == 0) {
         MessageBoxW(hWnd, L"Please enter an output file path.", L"Missing Output", MB_ICONWARNING | MB_OK);
+        goto cleanup;
+    }
+
+    //need to ignore binary location and use absolute path for in/out
+    BOOL inputIsUrl = IsUrl(input);
+    if (!inputIsUrl) {
+        DWORD full_len = GetFullPathNameW(input, INPUT_CCH, full_input, NULL);
+        if (full_len == 0 || full_len >= INPUT_CCH) {
+            MessageBoxW(hWnd, L"The input path is invalid or too long.", L"Invalid Input", MB_ICONWARNING | MB_OK);
+            goto cleanup;
+        }
+        if (GetFileAttributesW(full_input) == INVALID_FILE_ATTRIBUTES) {
+            MessageBoxW(hWnd, L"The input folder does not exist.", L"Invalid Input", MB_ICONWARNING | MB_OK);
+            goto cleanup;
+        }
+    }
+    const WCHAR* final_input = inputIsUrl ? input : full_input;
+
+    const WCHAR* output_error = ResolveOutputPath(final_input, inputIsUrl, output, full_output, MAX_PATH);
+    if (output_error) {
+        MessageBoxW(hWnd, output_error, L"Invalid Output", MB_ICONWARNING | MB_OK);
         goto cleanup;
     }
 
@@ -413,30 +584,41 @@ static void RunBase(HWND hWnd) {
 
     _snwprintf_s(bin_path, MAX_PATH, _TRUNCATE, L"%sd2m3u.exe", bin_dir);
 
-    QuotedArg(quoted_input, MAX_PATH + 2, input);
-    QuotedArg(quoted_output, MAX_PATH + 2, output);
-    QuotedArg(quoted_bin, MAX_PATH + 2, bin_path);
-
-    _snwprintf_s(cmd_buf, 4096, _TRUNCATE, L"%s", quoted_bin);
-    wcsncat_s(cmd_buf, 4096, L" -v", _TRUNCATE);
-    if (embedAuth)
-        wcsncat_s(cmd_buf, 4096, L" -e", _TRUNCATE);
-    if (splitDir)
-        wcsncat_s(cmd_buf, 4096, L" -s", _TRUNCATE);
-
-    if (IsUrl(input) && wcslen(username) > 0) {
-        WCHAR qUser[258], qPass[258];
-        QuotedArg(qUser, ARRAYSIZE(qUser), username);
-        QuotedArg(qPass, ARRAYSIZE(qPass), wcslen(password) > 0 ? password : L"");
-
-        WCHAR credBuf[600];
-        _snwprintf_s(credBuf, ARRAYSIZE(credBuf), _TRUNCATE,
-            L" -u %s -p %s", qUser, qPass);
-        wcsncat_s(cmd_buf, 4096, credBuf, _TRUNCATE);
+    if (!QuotedArg(quoted_input, INPUT_CCH * 2 + 4, final_input) ||
+        !QuotedArg(quoted_output, MAX_PATH * 2 + 4, full_output) ||
+        !QuotedArg(quoted_bin, MAX_PATH * 2 + 4, bin_path)) {
+        MessageBoxW(hWnd, L"Failed to build the command line.", L"Error", MB_ICONERROR | MB_OK);
+        goto cleanup;
     }
 
-    _snwprintf_s(pos_buf, MAX_PATH * 2 + 8, _TRUNCATE, L" %s %s", quoted_input, quoted_output);
-    wcsncat_s(cmd_buf, 4096, pos_buf, _TRUNCATE);
+    _snwprintf_s(cmd_buf, CMD_CCH, _TRUNCATE, L"%s", quoted_bin);
+    wcsncat_s(cmd_buf, CMD_CCH, L" -v", _TRUNCATE);
+    if (embedAuth)
+        wcsncat_s(cmd_buf, CMD_CCH, L" -e", _TRUNCATE);
+    if (splitDir)
+        wcsncat_s(cmd_buf, CMD_CCH, L" -s", _TRUNCATE);
+
+    if (inputIsUrl && wcslen(username) > 0) {
+        WCHAR qUser[256 * 2 + 4], qPass[256 * 2 + 4];
+        if (!QuotedArg(qUser, ARRAYSIZE(qUser), username) ||
+            !QuotedArg(qPass, ARRAYSIZE(qPass), password)) {
+            MessageBoxW(hWnd, L"Failed to build the command line.", L"Error", MB_ICONERROR | MB_OK);
+            goto cleanup;
+        }
+
+        wcsncat_s(cmd_buf, CMD_CCH, L" -u ", _TRUNCATE);
+        wcsncat_s(cmd_buf, CMD_CCH, qUser, _TRUNCATE);
+        //an empty -p value would swallow the next argument
+        if (wcslen(password) > 0) {
+            wcsncat_s(cmd_buf, CMD_CCH, L" -p ", _TRUNCATE);
+            wcsncat_s(cmd_buf, CMD_CCH, qPass, _TRUNCATE);
+        }
+    }
+
+    wcsncat_s(cmd_buf, CMD_CCH, L" ", _TRUNCATE);
+    wcsncat_s(cmd_buf, CMD_CCH, quoted_input, _TRUNCATE);
+    wcsncat_s(cmd_buf, CMD_CCH, L" ", _TRUNCATE);
+    wcsncat_s(cmd_buf, CMD_CCH, quoted_output, _TRUNCATE);
 
     if (bLogVisible) {
         LogPrint(L"Running: ");
@@ -482,12 +664,13 @@ static void RunBase(HWND hWnd) {
 
     char buf[1024];
     DWORD bytesRead;
-    while (ReadFile(hReadPipe, buf, sizeof(buf) - 1, &bytesRead, NULL) && bytesRead > 0) {
-        buf[bytesRead] = '\0';
-
+    while (ReadFile(hReadPipe, buf, sizeof(buf), &bytesRead, NULL) && bytesRead > 0) {
         WCHAR wbuf[2048];
-        MultiByteToWideChar(CP_UTF8, 0, buf, -1, wbuf, ARRAYSIZE(wbuf));
-        LogPrint(wbuf);
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, buf, (int)bytesRead, wbuf, ARRAYSIZE(wbuf) - 1);
+        if (wlen > 0) {
+            wbuf[wlen] = L'\0';
+            LogPrint(wbuf);
+        }
 
         MSG msg;
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
@@ -507,7 +690,11 @@ static void RunBase(HWND hWnd) {
     SetWindowTextW(hBtnGenerate, L"Generate");
 
     if (exit_code == 0) {
-        MessageBoxW(hWnd, L"Playlist generated successfully.", L"Done", MB_ICONINFORMATION | MB_OK);
+        WCHAR msg[MAX_PATH + 64];
+        StripFileName(full_output);
+        _snwprintf_s(msg, ARRAYSIZE(msg), _TRUNCATE,
+            L"Playlist generated successfully.\n\nSaved in:\n%s", full_output);
+        MessageBoxW(hWnd, msg, L"Done", MB_ICONINFORMATION | MB_OK);
     }
     else {
         WCHAR msg[128];
@@ -526,7 +713,9 @@ static void RunBase(HWND hWnd) {
 
 cleanup:
     free(input);
+    free(full_input);
     free(output);
+    free(full_output);
     free(username);
     free(password);
     free(bin_dir);
@@ -535,7 +724,6 @@ cleanup:
     free(quoted_input);
     free(quoted_output);
     free(quoted_bin);
-    free(pos_buf);
 }
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -569,6 +757,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             x, y, w - 40, eh,
             hWnd, (HMENU)EDT_INPUT, hInst, NULL);
         SendMessage(hEdtInput, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessage(hEdtInput, EM_LIMITTEXT, INPUT_CCH - 1, 0);
         hBtnBrowse = CreateWindowW(L"BUTTON", L"...",
             WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_TABSTOP,
             x + w - 36, y, 30, eh,
@@ -584,6 +773,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             x, y, w - 7, eh,
             hWnd, (HMENU)EDT_USERNAME, hInst, NULL);
         SendMessage(hEdtUsername, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessage(hEdtUsername, EM_LIMITTEXT, 255, 0);
         y += eh + gap;
 
         //password
@@ -594,6 +784,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             x, y, w - 7, eh,
             hWnd, (HMENU)EDT_PASSWORD, hInst, NULL);
         SendMessage(hEdtPassword, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessage(hEdtPassword, EM_LIMITTEXT, 255, 0);
         y += eh + gap;
 
         //-e flag
@@ -612,8 +803,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             x, y, w - 40, eh,
             hWnd, (HMENU)EDT_OUTPUT, hInst, NULL);
         SendMessage(hEdtOutput, WM_SETFONT, (WPARAM)hFont, TRUE);
+        SendMessage(hEdtOutput, EM_LIMITTEXT, MAX_PATH - 1, 0);
         hBtnSave = CreateWindowW(L"BUTTON", L"...",
-            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON | WS_TABSTOP,
             x + w - 36, y, 30, eh,
             hWnd, (HMENU)BTN_SAVE, hInst, NULL);
         SendMessage(hBtnSave, WM_SETFONT, (WPARAM)hFont, TRUE);
