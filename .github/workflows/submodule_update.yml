@@ -1,0 +1,53 @@
+name: Update d2m3u submodule
+
+on:
+  repository_dispatch:
+    types: [d2m3u-updated]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-submodule
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Bump d2m3u to latest trunk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Update submodule
+        id: update
+        run: |
+          old=$(git rev-parse HEAD:d2m3u)
+          git submodule update --init --remote -- d2m3u
+          new=$(git -C d2m3u rev-parse HEAD)
+
+          if [ "$old" = "$new" ]; then
+            echo "d2m3u is already up to date ($old)."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        if: steps.update.outputs.changed == 'true'
+        env:
+          OLD: ${{ steps.update.outputs.old }}
+          NEW: ${{ steps.update.outputs.new }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add d2m3u
+          git commit -m "Update d2m3u to ${NEW:0:7}" \
+            -m "https://github.com/fujimite/d2m3u/compare/${OLD:0:7}...${NEW:0:7}"
+          git push
